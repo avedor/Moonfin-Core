@@ -3,6 +3,7 @@ import 'package:flutter/services.dart';
 import 'package:moonfin_design/moonfin_design.dart';
 
 import '../../../../../util/focus/dpad_keys.dart';
+import '../../../../../util/focus/scroll_utils.dart';
 import '../../../../widgets/focus/focusable_wrapper.dart';
 
 class NouveauSegmentedSelector<T> extends StatefulWidget {
@@ -44,6 +45,8 @@ class NouveauSegmentedSelectorState<T>
     extends State<NouveauSegmentedSelector<T>> {
   final Map<T, FocusNode> _focusNodes = {};
 
+  final ScrollController _scrollController = ScrollController();
+
   T? _hoveredValue;
 
   FocusNode _focusNodeFor(T value) {
@@ -81,8 +84,126 @@ class NouveauSegmentedSelectorState<T>
   }
 
   void _handleFocusChanged(bool focused, T value) {
-    if (focused && widget.selectOnFocus && value != widget.selectedValue) {
-      widget.onValueActivated(value);
+    if (focused) {
+      // Keep the focused segment on screen. Long season lists overflow the
+      // pill, so without this the highlighted season can sit off the right
+      // edge.
+      _scheduleEnsureSegmentVisible(value);
+
+      if (widget.selectOnFocus && value != widget.selectedValue) {
+        widget.onValueActivated(value);
+      }
+
+      return;
+    }
+  }
+
+  @override
+  void initState() {
+    super.initState();
+
+    // Reveal the initially selected segment (for example when a deep link or
+    // the episode rail selects a later season) once the first frame is laid
+    // out. Jump rather than animate so the bar starts settled.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) {
+        _ensureSegmentVisible(widget.selectedValue, animate: false);
+      }
+    });
+  }
+
+  @override
+  void didUpdateWidget(covariant NouveauSegmentedSelector<T> oldWidget) {
+    super.didUpdateWidget(oldWidget);
+
+    // The selection can change without the segment taking focus, such as when
+    // the episode rail scrolls into a different season. Bring the highlighted
+    // segment into view so it is not left off screen.
+    if (oldWidget.selectedValue != widget.selectedValue) {
+      _scheduleEnsureSegmentVisible(widget.selectedValue);
+    }
+  }
+
+  void _scheduleEnsureSegmentVisible(T? value) {
+    if (value == null) {
+      return;
+    }
+
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) {
+        _ensureSegmentVisible(value);
+      }
+    });
+  }
+
+  /// Scrolls the horizontal pill just enough to bring [value] fully into view,
+  /// leaving a small margin so a focused border is never clipped. Does nothing
+  /// when the segment is already visible.
+  void _ensureSegmentVisible(T? value, {bool animate = true}) {
+    if (value == null || !mounted) {
+      return;
+    }
+
+    final targetContext = _focusNodes[value]?.context;
+
+    if (targetContext == null) {
+      return;
+    }
+
+    final targetBox = targetContext.findRenderObject();
+
+    final scrollable = Scrollable.maybeOf(targetContext);
+
+    final viewportBox = scrollable?.context.findRenderObject();
+
+    if (targetBox is! RenderBox ||
+        !targetBox.hasSize ||
+        viewportBox is! RenderBox ||
+        !viewportBox.hasSize ||
+        !_scrollController.hasClients) {
+      return;
+    }
+
+    const edgeMargin = 8.0;
+
+    final viewportExtent = viewportBox.size.width;
+
+    final targetOrigin = targetBox.localToGlobal(
+      Offset.zero,
+      ancestor: viewportBox,
+    );
+
+    final targetLeading = targetOrigin.dx;
+
+    final targetTrailing = targetLeading + targetBox.size.width;
+
+    final double delta;
+
+    if (targetLeading < edgeMargin) {
+      delta = targetLeading - edgeMargin;
+    } else if (targetTrailing > viewportExtent - edgeMargin) {
+      delta = targetTrailing - (viewportExtent - edgeMargin);
+    } else {
+      return;
+    }
+
+    final target = (_scrollController.offset + delta).clamp(
+      0.0,
+      _scrollController.position.maxScrollExtent,
+    );
+
+    if ((target - _scrollController.offset).abs() < 0.5) {
+      return;
+    }
+
+    if (animate) {
+      _scrollController.animateTo(
+        target,
+        duration: navigationAnimationDuration,
+        curve: Curves.easeOut,
+      );
+    } else {
+      _scrollController.jumpTo(target);
     }
   }
 
@@ -91,6 +212,8 @@ class NouveauSegmentedSelectorState<T>
     for (final node in _focusNodes.values) {
       node.dispose();
     }
+
+    _scrollController.dispose();
 
     super.dispose();
   }
@@ -102,14 +225,16 @@ class NouveauSegmentedSelectorState<T>
     return Container(
       height: widget.height,
       padding: const EdgeInsets.all(2),
+      clipBehavior: Clip.antiAlias,
       decoration: BoxDecoration(
         color: foreground.withValues(alpha: 0.045),
         border: Border.all(color: foreground.withValues(alpha: 0.12)),
         borderRadius: BorderRadius.circular(20),
       ),
       child: SingleChildScrollView(
+        controller: _scrollController,
         scrollDirection: Axis.horizontal,
-        clipBehavior: Clip.none,
+        clipBehavior: Clip.hardEdge,
         child: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
